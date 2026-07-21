@@ -39,7 +39,9 @@ static IMP findMethod(Class cls, NSString *selPrefix) {
 // ── NSUserDefaults hooks ─────────────────────────────────────
 
 static id (*orig_UD_object)(id, SEL, id);
+static id (*orig_UD_data)(id, SEL, id);
 static void (*orig_UD_setObject)(id, SEL, id, id);
+static void (*orig_UD_removeObject)(id, SEL, id);
 
 static id hook_UD_objectForKey(id self, SEL _cmd, id key) {
     if ([key isEqual:@"maxpod.purchase.verified_product_ids.v1"]) {
@@ -51,6 +53,23 @@ static id hook_UD_objectForKey(id self, SEL _cmd, id key) {
     return orig_UD_object ? orig_UD_object(self, _cmd, key) : nil;
 }
 
+static id hook_UD_dataForKey(id self, SEL _cmd, id key) {
+    // Never return nil for checkpoints or identity - forces app to
+    // use cached verified_product_ids without re-verification
+    if ([key isEqual:@"maxpod.purchase.entitlement_checkpoints.v2"]) {
+        id cached = orig_UD_data ? orig_UD_data(self, _cmd, key) : nil;
+        if (cached) return cached;
+        // Return a non-nil placeholder so the app doesn't trigger full re-sync
+        return [@"{\"v\":2}" dataUsingEncoding:NSUTF8StringEncoding];
+    }
+    if ([key isEqual:@"maxpod.purchase.active_store_identity.v1"]) {
+        id cached = orig_UD_data ? orig_UD_data(self, _cmd, key) : nil;
+        if (cached) return cached;
+        return [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
+    }
+    return orig_UD_data ? orig_UD_data(self, _cmd, key) : nil;
+}
+
 static void hook_UD_setObject_forKey(id self, SEL _cmd, id obj, id key) {
     if ([key isEqual:@"maxpod.purchase.verified_product_ids.v1"] ||
         [key isEqual:@"maxpod.purchase.verified_at.v1"] ||
@@ -58,6 +77,15 @@ static void hook_UD_setObject_forKey(id self, SEL _cmd, id obj, id key) {
         return;
     }
     if (orig_UD_setObject) orig_UD_setObject(self, _cmd, obj, key);
+}
+
+static void hook_UD_removeObjectForKey(id self, SEL _cmd, id key) {
+    // Block removal of purchase-related keys
+    if ([key hasPrefix:@"maxpod.purchase."] ||
+        [key hasPrefix:@"maxpod.purchase_preview."]) {
+        return;
+    }
+    if (orig_UD_removeObject) orig_UD_removeObject(self, _cmd, key);
 }
 
 // ── SKPaymentQueue hook ──────────────────────────────────────
@@ -199,8 +227,12 @@ static void init(void) {
         // 2. Hook NSUserDefaults
         swizzle([NSUserDefaults class], @selector(objectForKey:),
                 (IMP)hook_UD_objectForKey, (IMP*)&orig_UD_object);
+        swizzle([NSUserDefaults class], @selector(dataForKey:),
+                (IMP)hook_UD_dataForKey, (IMP*)&orig_UD_data);
         swizzle([NSUserDefaults class], @selector(setObject:forKey:),
                 (IMP)hook_UD_setObject_forKey, (IMP*)&orig_UD_setObject);
+        swizzle([NSUserDefaults class], @selector(removeObjectForKey:),
+                (IMP)hook_UD_removeObjectForKey, (IMP*)&orig_UD_removeObject);
 
         // 3. Hook SKPaymentQueue + find StoreKitPurchaseService (delayed)
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500*NSEC_PER_MSEC),
