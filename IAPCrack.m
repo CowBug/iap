@@ -88,6 +88,12 @@ static void hook_UD_removeObjectForKey(id self, SEL _cmd, id key) {
     if (orig_UD_removeObject) orig_UD_removeObject(self, _cmd, key);
 }
 
+// ── Purchase simulation category (forward decl) ──────────────
+
+@interface SKPaymentQueue (IAPCrack)
+- (void)_simulatePurchaseSuccess:(SKPayment *)payment;
+@end
+
 // ── SKPaymentQueue hook ──────────────────────────────────────
 
 static void (*orig_SKPQ_add)(id, SEL, id);
