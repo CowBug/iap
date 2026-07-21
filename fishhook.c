@@ -8,6 +8,10 @@
 #include <mach-o/dyld.h>
 #include <mach-o/nlist.h>
 
+#ifndef SEG_DATA_CONST
+#define SEG_DATA_CONST "__DATA_CONST"
+#endif
+
 #ifdef __LP64__
 typedef struct mach_header_64     mach_header_t;
 typedef struct segment_command_64 segment_command_t;
