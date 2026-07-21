@@ -1,0 +1,8 @@
+*.dylib
+*.patched
+*.o
+zsign/
+zsign*.zip
+__pycache__/
+*.pyc
+.DS_Store
