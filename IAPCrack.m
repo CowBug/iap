@@ -62,6 +62,10 @@ static NSURL *hook_receiptURL(id self, SEL _cmd) {
 
 // ── SKPaymentQueue hooks ─────────────────────────────────────
 
+@interface SKPaymentQueue (IAP)
+- (void)_simulate:(SKPayment *)payment;
+@end
+
 static void (*orig_SKPQ_add)(id, SEL, id);
 
 static void hook_SKPQ_addPayment(id self, SEL _cmd, SKPayment *payment) {
@@ -72,10 +76,6 @@ static void hook_SKPQ_addPayment(id self, SEL _cmd, SKPayment *payment) {
     }
     if (orig_SKPQ_add) orig_SKPQ_add(self, _cmd, payment);
 }
-
-@interface SKPaymentQueue (IAP)
-- (void)_simulate:(SKPayment *)payment;
-@end
 
 @implementation SKPaymentQueue (IAP)
 - (void)_simulate:(SKPayment *)payment {
@@ -107,7 +107,7 @@ static void hook_SKPQ_addPayment(id self, SEL _cmd, SKPayment *payment) {
         [ud setObject:@[kPro, kUltimate] forKey:@"maxpod.purchase.verified_product_ids.v1"];
         [ud setObject:[NSDate date] forKey:@"maxpod.purchase.verified_at.v1"];
         [ud synchronize];
-        NSLog(@"[IAPCrack] ✓ simulated %@", pid);
+        NSLog(@"[IAPCrack] ✓ simulated %@", payment.productIdentifier);
     } @catch (NSException *e) {
         NSLog(@"[IAPCrack] KVC failed: %@ — falling through", e);
     }
