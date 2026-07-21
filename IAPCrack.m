@@ -2,217 +2,127 @@
 #import <objc/message.h>
 #import <Foundation/Foundation.h>
 #import <StoreKit/StoreKit.h>
+#import <UIKit/UIKit.h>
 
-static NSString * const kProLifetime = @"com.maxpod.pro_lifetime";
-static NSString * const kUltimateLifetime = @"com.maxpod.ultimate_lifetime";
-static NSString * const kUltimateUpgrade = @"com.maxpod.ultimate_upgrade_from_pro";
-
-// ── Runtime method hunting ───────────────────────────────────
-
-static void logAllMethods(Class cls, const char *label) {
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    for (unsigned int i = 0; i < count; i++) {
-        SEL sel = method_getName(methods[i]);
-        NSLog(@"[IAPCrack] %s method: %@", label, NSStringFromSelector(sel));
-    }
-    free(methods);
-}
-
-static IMP findMethod(Class cls, NSString *selPrefix) {
-    unsigned int count = 0;
-    Method *methods = class_copyMethodList(cls, &count);
-    for (unsigned int i = 0; i < count; i++) {
-        SEL sel = method_getName(methods[i]);
-        NSString *name = NSStringFromSelector(sel);
-        if ([name rangeOfString:selPrefix options:NSCaseInsensitiveSearch].location != NSNotFound) {
-            IMP imp = method_getImplementation(methods[i]);
-            free(methods);
-            NSLog(@"[IAPCrack] found %@ → %p", name, imp);
-            return imp;
-        }
-    }
-    free(methods);
-    return NULL;
-}
+static NSString * const kPro = @"com.maxpod.pro_lifetime";
+static NSString * const kUltimate = @"com.maxpod.ultimate_lifetime";
 
 // ── NSUserDefaults hooks ─────────────────────────────────────
 
-static id (*orig_UD_object)(id, SEL, id);
+static id (*orig_UD_obj)(id, SEL, id);
 static id (*orig_UD_data)(id, SEL, id);
-static void (*orig_UD_setObject)(id, SEL, id, id);
-static void (*orig_UD_removeObject)(id, SEL, id);
+static void (*orig_UD_set)(id, SEL, id, id);
+static void (*orig_UD_rm)(id, SEL, id);
+static id (*orig_UD_bool)(id, SEL, id);
 
-static id hook_UD_objectForKey(id self, SEL _cmd, id key) {
-    if ([key isEqual:@"maxpod.purchase.verified_product_ids.v1"]) {
-        return @[kProLifetime, kUltimateLifetime];
-    }
-    if ([key isEqual:@"maxpod.purchase.verified_at.v1"]) {
+static id hook_UD_obj(id self, SEL _cmd, id key) {
+    if ([key isEqual:@"maxpod.purchase.verified_product_ids.v1"])
+        return @[kPro, kUltimate];
+    if ([key isEqual:@"maxpod.purchase.verified_at.v1"])
         return [NSDate date];
-    }
-    return orig_UD_object ? orig_UD_object(self, _cmd, key) : nil;
+    return orig_UD_obj ? orig_UD_obj(self, _cmd, key) : nil;
 }
 
-static id hook_UD_dataForKey(id self, SEL _cmd, id key) {
-    // Never return nil for checkpoints or identity - forces app to
-    // use cached verified_product_ids without re-verification
-    if ([key isEqual:@"maxpod.purchase.entitlement_checkpoints.v2"]) {
-        id cached = orig_UD_data ? orig_UD_data(self, _cmd, key) : nil;
-        if (cached) return cached;
-        // Return a non-nil placeholder so the app doesn't trigger full re-sync
+static id hook_UD_data(id self, SEL _cmd, id key) {
+    id cached = orig_UD_data ? orig_UD_data(self, _cmd, key) : nil;
+    if (cached) return cached;
+    // Prevent nil return which triggers re-sync
+    if ([key isEqual:@"maxpod.purchase.entitlement_checkpoints.v2"])
         return [@"{\"v\":2}" dataUsingEncoding:NSUTF8StringEncoding];
-    }
-    if ([key isEqual:@"maxpod.purchase.active_store_identity.v1"]) {
-        id cached = orig_UD_data ? orig_UD_data(self, _cmd, key) : nil;
-        if (cached) return cached;
-        return [@"{}" dataUsingEncoding:NSUTF8StringEncoding];
-    }
-    return orig_UD_data ? orig_UD_data(self, _cmd, key) : nil;
+    if ([key isEqual:@"maxpod.purchase.active_store_identity.v1"])
+        return [@"{\"id\":\"store\"}" dataUsingEncoding:NSUTF8StringEncoding];
+    return nil;
 }
 
-static void hook_UD_setObject_forKey(id self, SEL _cmd, id obj, id key) {
-    if ([key isEqual:@"maxpod.purchase.verified_product_ids.v1"] ||
-        [key isEqual:@"maxpod.purchase.verified_at.v1"] ||
-        [key isEqual:@"maxpod.purchase.pending_approval_product_id.v1"]) {
+static void hook_UD_set(id self, SEL _cmd, id obj, id key) {
+    if ([key hasPrefix:@"maxpod.purchase."] || [key hasPrefix:@"maxpod.purchase_preview."])
         return;
-    }
-    if (orig_UD_setObject) orig_UD_setObject(self, _cmd, obj, key);
+    if (orig_UD_set) orig_UD_set(self, _cmd, obj, key);
 }
 
-static void hook_UD_removeObjectForKey(id self, SEL _cmd, id key) {
-    // Block removal of purchase-related keys
-    if ([key hasPrefix:@"maxpod.purchase."] ||
-        [key hasPrefix:@"maxpod.purchase_preview."]) {
+static void hook_UD_rm(id self, SEL _cmd, id key) {
+    if ([key hasPrefix:@"maxpod.purchase."] || [key hasPrefix:@"maxpod.purchase_preview."])
         return;
-    }
-    if (orig_UD_removeObject) orig_UD_removeObject(self, _cmd, key);
+    if (orig_UD_rm) orig_UD_rm(self, _cmd, key);
 }
 
-// ── Purchase simulation category (forward decl) ──────────────
+static id hook_UD_bool(id self, SEL _cmd, id key) {
+    if ([key isEqual:@"unlockedUltimate"]) return @YES;
+    return orig_UD_bool ? orig_UD_bool(self, _cmd, key) : nil;
+}
 
-@interface SKPaymentQueue (IAPCrack)
-- (void)_simulatePurchaseSuccess:(SKPayment *)payment;
-@end
+// ── Receipt URL hook ─────────────────────────────────────────
 
-// ── SKPaymentQueue hook ──────────────────────────────────────
+static NSURL * (*orig_bundle_receiptURL)(id, SEL);
+
+static NSURL *hook_receiptURL(id self, SEL _cmd) {
+    // Return nil → app falls back to local cache, not server check
+    return nil;
+}
+
+// ── SKPaymentQueue hooks ─────────────────────────────────────
 
 static void (*orig_SKPQ_add)(id, SEL, id);
 
 static void hook_SKPQ_addPayment(id self, SEL _cmd, SKPayment *payment) {
     NSString *pid = payment.productIdentifier;
-    if ([pid isEqualToString:kProLifetime] ||
-        [pid isEqualToString:kUltimateLifetime] ||
-        [pid isEqualToString:kUltimateUpgrade]) {
-        // Simulate purchase success to trigger the app's purchase flow
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 300*NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{
-            [self _simulatePurchaseSuccess:payment];
-        });
+    if ([pid isEqualToString:kPro] || [pid isEqualToString:kUltimate]) {
+        [self _simulate:payment];
         return;
     }
     if (orig_SKPQ_add) orig_SKPQ_add(self, _cmd, payment);
 }
 
-// ── Purchase simulation category ─────────────────────────────
-
-@interface SKPaymentQueue (IAPCrack)
-- (void)_simulatePurchaseSuccess:(SKPayment *)payment;
+@interface SKPaymentQueue (IAP)
+- (void)_simulate:(SKPayment *)payment;
 @end
 
-@implementation SKPaymentQueue (IAPCrack)
-- (void)_simulatePurchaseSuccess:(SKPayment *)payment {
-    Class txCls = objc_getClass("SKPaymentTransaction");
-    if (!txCls) return;
-
-    // Try to create a transaction via KVC
-    id tx = class_createInstance(txCls, 0);
+@implementation SKPaymentQueue (IAP)
+- (void)_simulate:(SKPayment *)payment {
+    // Use KVC on a freshly allocated transaction
+    id tx = class_createInstance(objc_getClass("SKPaymentTransaction"), 0);
     @try {
         [tx setValue:payment forKey:@"payment"];
-        [tx setValue:[NSString stringWithFormat:@"%010ld000000", (long)time(NULL)]
-               forKey:@"transactionIdentifier"];
-        [tx setValue:[NSDate date] forKey:@"transactionDate"];
-        // transactionState = 1 = SKPaymentTransactionStatePurchased
-        [tx setValue:@(1) forKey:@"transactionState"];
 
+        NSString *txID = [NSString stringWithFormat:@"%010ld%06d",
+                          (long)time(NULL), arc4random_uniform(999999)];
+        [tx setValue:txID forKey:@"transactionIdentifier"];
+        [tx setValue:[NSDate date] forKey:@"transactionDate"];
+        [tx setValue:@(1) forKey:@"transactionState"]; // purchased
+
+        // Notify all observers
         NSArray *obs = [self valueForKey:@"transactionObservers"] ?: @[];
-        for (id observer in obs) {
+        for (id o in obs) {
             @try {
                 ((void(*)(id,SEL,id,id))objc_msgSend)(
-                    observer,
-                    sel_registerName("paymentQueue:updatedTransactions:"),
-                    self,
-                    @[tx]
-                );
+                    o, sel_registerName("paymentQueue:updatedTransactions:"),
+                    self, @[tx]);
             } @catch (NSException *e) {
-                NSLog(@"[IAPCrack] observer notify failed: %@", e);
+                NSLog(@"[IAPCrack] notify err: %@", e);
             }
         }
-        // Persist in defaults
+
+        // Persist reinforced data
         NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setObject:@[kProLifetime, kUltimateLifetime]
-               forKey:@"maxpod.purchase.verified_product_ids.v1"];
+        [ud setObject:@[kPro, kUltimate] forKey:@"maxpod.purchase.verified_product_ids.v1"];
         [ud setObject:[NSDate date] forKey:@"maxpod.purchase.verified_at.v1"];
         [ud synchronize];
-        NSLog(@"[IAPCrack] ✓ simulated purchase: %@", payment.productIdentifier);
+        NSLog(@"[IAPCrack] ✓ simulated %@", pid);
     } @catch (NSException *e) {
-        NSLog(@"[IAPCrack] simulate failed: %@", e);
+        NSLog(@"[IAPCrack] KVC failed: %@ — falling through", e);
     }
 }
 @end
 
-// ── Swizzle helper ───────────────────────────────────────────
+// ── Swizzle ──────────────────────────────────────────────────
 
-static BOOL swizzle(Class cls, SEL sel, IMP new, IMP *old) {
-    Method m = class_getInstanceMethod(cls, sel);
-    if (!m) m = class_getClassMethod(cls, sel);
+static BOOL swizz(Class c, SEL s, IMP n, IMP *o) {
+    Method m = class_getInstanceMethod(c, s);
+    if (!m) m = class_getClassMethod(c, s);
     if (!m) return NO;
-    if (old) *old = method_getImplementation(m);
-    method_setImplementation(m, new);
+    if (o) *o = method_getImplementation(m);
+    method_setImplementation(m, n);
     return YES;
-}
-
-// ── Hook StoreKitPurchaseService ─────────────────────────────
-
-static void hookPurchaseService(void) {
-    // Try both ObjC mangled names
-    Class psvc = objc_getClass("_TtC9MaxPodApp23StoreKitPurchaseService");
-    if (!psvc) {
-        psvc = NSClassFromString(@"MaxPodApp.StoreKitPurchaseService");
-    }
-    if (!psvc) {
-        NSLog(@"[IAPCrack] StoreKitPurchaseService not found yet, will retry...");
-        return;
-    }
-    NSLog(@"[IAPCrack] StoreKitPurchaseService = %@", psvc);
-    logAllMethods(psvc, "StoreKitPurchaseService");
-
-    // Hook purchase access / tier check methods
-    // Common Swift→ObjC selector patterns for purchase services
-    SEL candidates[] = {
-        NSSelectorFromString(@"purchaseAccess"),
-        NSSelectorFromString(@"purchaseAccessWithContext:"),
-        NSSelectorFromString(@"purchaseAccessWith:"),
-        NSSelectorFromString(@"purchaseTier"),
-        NSSelectorFromString(@"effectiveTier"),
-        NSSelectorFromString(@"currentTier"),
-        NSSelectorFromString(@"syncPurchaseState"),
-        NSSelectorFromString(@"syncPurchaseStateWithCompletionHandler:"),
-        NSSelectorFromString(@"isPro"),
-        NSSelectorFromString(@"isUltimate"),
-        NSSelectorFromString(@"checkEntitlements"),
-        NSSelectorFromString(@"refreshEntitlements"),
-        NSSelectorFromString(@"verifyEntitlements"),
-        NSSelectorFromString(@"entitledFeatures"),
-        NSSelectorFromString(@"activePurchases"),
-    };
-
-    for (size_t i = 0; i < sizeof(candidates)/sizeof(candidates[0]); i++) {
-        Method m = class_getInstanceMethod(psvc, candidates[i]);
-        if (!m) m = class_getClassMethod(psvc, candidates[i]);
-        if (m) {
-            NSLog(@"[IAPCrack] found hook target: %@", NSStringFromSelector(candidates[i]));
-        }
-    }
 }
 
 // ── Constructor ──────────────────────────────────────────────
@@ -220,49 +130,62 @@ static void hookPurchaseService(void) {
 __attribute__((constructor))
 static void init(void) {
     @autoreleasepool {
-        NSLog(@"[IAPCrack] loaded");
+        NSLog(@"[IAPCrack] v4 loaded");
 
-        // 1. Seed UserDefaults
-        NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
-        [ud setObject:@[kProLifetime, kUltimateLifetime]
-               forKey:@"maxpod.purchase.verified_product_ids.v1"];
-        [ud setObject:[NSDate date] forKey:@"maxpod.purchase.verified_at.v1"];
-        [ud removeObjectForKey:@"maxpod.purchase.pending_approval_product_id.v1"];
-        [ud synchronize];
+        // 1. Seed all relevant defaults
+        NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
+        NSDictionary *seed = @{
+            @"maxpod.purchase.verified_product_ids.v1": @[kPro, kUltimate],
+            @"maxpod.purchase.verified_at.v1": [NSDate date],
+            @"unlockedUltimate": @YES,
+            // Preview grant — permanent trial as fallback
+            @"maxpod.purchase_preview.active_grant.v1": @{@"tier":@"ultimate",@"expires":@"2099-01-01"},
+            @"maxpod.purchase_preview.consumed_kinds.v1": @[],
+        };
+        for (NSString *k in seed) {
+            id v = seed[k];
+            if (![u objectForKey:k]) [u setObject:v forKey:k];
+        }
+        [u synchronize];
 
         // 2. Hook NSUserDefaults
-        swizzle([NSUserDefaults class], @selector(objectForKey:),
-                (IMP)hook_UD_objectForKey, (IMP*)&orig_UD_object);
-        swizzle([NSUserDefaults class], @selector(dataForKey:),
-                (IMP)hook_UD_dataForKey, (IMP*)&orig_UD_data);
-        swizzle([NSUserDefaults class], @selector(setObject:forKey:),
-                (IMP)hook_UD_setObject_forKey, (IMP*)&orig_UD_setObject);
-        swizzle([NSUserDefaults class], @selector(removeObjectForKey:),
-                (IMP)hook_UD_removeObjectForKey, (IMP*)&orig_UD_removeObject);
+        swizz([NSUserDefaults class], @selector(objectForKey:),
+              (IMP)hook_UD_obj, (IMP*)&orig_UD_obj);
+        swizz([NSUserDefaults class], @selector(dataForKey:),
+              (IMP)hook_UD_data, (IMP*)&orig_UD_data);
+        swizz([NSUserDefaults class], @selector(setObject:forKey:),
+              (IMP)hook_UD_set, (IMP*)&orig_UD_set);
+        swizz([NSUserDefaults class], @selector(removeObjectForKey:),
+              (IMP)hook_UD_rm, (IMP*)&orig_UD_rm);
+        swizz([NSUserDefaults class], @selector(boolForKey:),
+              (IMP)hook_UD_bool, (IMP*)&orig_UD_bool);
 
-        // 3. Hook SKPaymentQueue + find StoreKitPurchaseService (delayed)
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 500*NSEC_PER_MSEC),
-                       dispatch_get_main_queue(), ^{
+        // 3. Hook receipt URL — force app to skip server receipt check
+        swizz([NSBundle class], @selector(appStoreReceiptURL),
+              (IMP)hook_receiptURL, (IMP*)&orig_bundle_receiptURL);
+
+        // 4. Hook SKPaymentQueue (delayed for safety)
+        dispatch_async(dispatch_get_main_queue(), ^{
             Class pq = objc_getClass("SKPaymentQueue");
             if (pq) {
-                swizzle(pq, @selector(addPayment:),
-                        (IMP)hook_SKPQ_addPayment, (IMP*)&orig_SKPQ_add);
+                swizz(pq, @selector(addPayment:),
+                      (IMP)hook_SKPQ_addPayment, (IMP*)&orig_SKPQ_add);
                 NSLog(@"[IAPCrack] SKPaymentQueue hooked");
             }
-            hookPurchaseService();
         });
 
-        // 4. Re-seed defaults periodically to fight re-verification
-        // The app re-checks Transaction.currentEntitlements and may
-        // clear our data; we reinforce every few seconds
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 2*NSEC_PER_SEC),
-                       dispatch_get_main_queue(), ^{
-            NSUserDefaults *u = [NSUserDefaults standardUserDefaults];
-            [u setObject:@[kProLifetime, kUltimateLifetime]
-                  forKey:@"maxpod.purchase.verified_product_ids.v1"];
-            [u setObject:[NSDate date] forKey:@"maxpod.purchase.verified_at.v1"];
-            [u synchronize];
-            NSLog(@"[IAPCrack] reinforced seed");
-        });
+        // 5. Repeated re-seed to fight re-verification cycles
+        for (int d = 2; d <= 10; d++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, d * NSEC_PER_SEC),
+                           dispatch_get_main_queue(), ^{
+                NSUserDefaults *ud = [NSUserDefaults standardUserDefaults];
+                [ud setObject:@[kPro, kUltimate]
+                       forKey:@"maxpod.purchase.verified_product_ids.v1"];
+                [ud setObject:[NSDate date]
+                       forKey:@"maxpod.purchase.verified_at.v1"];
+                [ud setBool:YES forKey:@"unlockedUltimate"];
+                [ud synchronize];
+            });
+        }
     }
 }
