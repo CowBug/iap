@@ -10,9 +10,8 @@ CC          = xcrun -sdk $(SDK) clang
 CFLAGS      = -arch $(ARCH) -miphoneos-version-min=$(MIN_VER) -isysroot $$(xcrun -sdk $(SDK) --show-sdk-path) -O2 -fobjc-arc -fvisibility=hidden
 LDFLAGS     = -dynamiclib -framework Foundation -framework StoreKit -framework UIKit -current_version 1.0 -compatibility_version 1.0 -install_name @executable_path/Frameworks/IAPCrack.dylib
 
-SRCS = IAPCrack.m fishhook.c
+SRCS = IAPCrack.m
 OBJS = $(SRCS:.m=.o)
-OBJS := $(OBJS:.c=.o)
 
 .PHONY: all clean
 
